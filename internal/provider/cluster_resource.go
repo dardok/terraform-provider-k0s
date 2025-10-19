@@ -38,16 +38,17 @@ type ClusterResourceModel struct {
 }
 
 type ClusterResourceModelHost struct {
-	Role             types.String                `tfsdk:"role"`
-	Reset            types.Bool                  `tfsdk:"reset"`
-	NoTaints         types.Bool                  `tfsdk:"no_taints"`
-	Hostname         types.String                `tfsdk:"hostname"`
-	SSH              ClusterResourceModelHostSSH `tfsdk:"ssh"`
-	PrivateInterface types.String                `tfsdk:"private_interface"`
-	PrivateAddress   types.String                `tfsdk:"private_address"`
-	OS               types.String                `tfsdk:"os"`
-	InstallFlags     types.List                  `tfsdk:"install_flags"`
-	Environment      types.Map                   `tfsdk:"environment"`
+	Role             types.String                		`tfsdk:"role"`
+	Reset            types.Bool                  		`tfsdk:"reset"`
+	NoTaints         types.Bool                  		`tfsdk:"no_taints"`
+	Hostname         types.String                		`tfsdk:"hostname"`
+	SSH              ClusterResourceModelHostSSH 		`tfsdk:"ssh"`
+	PrivateInterface types.String                		`tfsdk:"private_interface"`
+	PrivateAddress   types.String                		`tfsdk:"private_address"`
+	OS               types.String                		`tfsdk:"os"`
+	InstallFlags     types.List                  		`tfsdk:"install_flags"`
+	Environment      types.Map                   		`tfsdk:"environment"`
+	Hooks            ClusterResourceModelHostHooksPhase `tfsdk:"hooks"`
 }
 
 type ClusterResourceModelHostSSH struct {
@@ -56,6 +57,16 @@ type ClusterResourceModelHostSSH struct {
 	Port    types.Int64  `tfsdk:"port"`
 	KeyPath types.String `tfsdk:"key_path"`
 	KeyRaw  types.String `tfsdk:"key_raw"`
+}
+
+type ClusterResourceModelHostHooksPhase struct {
+	Apply  ClusterResourceModelHostHooks `tfsdk:"apply"`
+	Reset  ClusterResourceModelHostHooks `tfsdk:"reset"`
+}
+
+type ClusterResourceModelHostHooks struct {
+	Before types.List `tfsdk:"before"`
+	After  types.List `tfsdk:"after"`
 }
 
 type ClusterResource struct {
@@ -135,6 +146,44 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							MarkdownDescription: "List of key-value pairs to set to the target host's environment variables.",
 							Optional:            true,
 							ElementType:         types.StringType,
+						},
+						"hooks": schema.SingleNestedAttribute{
+							MarkdownDescription: "Phase hooks.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"apply": schema.SingleNestedAttribute{
+									MarkdownDescription: "Apply phase hooks.",
+									Optional:            true,
+									Attributes: map[string]schema.Attribute{
+										"before": schema.ListAttribute{
+											MarkdownDescription: "Before apply phase hooks.",
+											Optional:            true,
+											ElementType:         types.StringType,
+										},
+										"after": schema.ListAttribute{
+											MarkdownDescription: "After apply phase hooks.",
+											Optional:            true,
+											ElementType:         types.StringType,
+										},
+									},
+								},
+								"reset": schema.SingleNestedAttribute{
+									MarkdownDescription: "Reset phase hooks.",
+									Optional:            true,
+									Attributes: map[string]schema.Attribute{
+										"before": schema.ListAttribute{
+											MarkdownDescription: "Before reset phase hooks.",
+											Optional:            true,
+											ElementType:         types.StringType,
+										},
+										"after": schema.ListAttribute{
+											MarkdownDescription: "After reset phase hooks.",
+											Optional:            true,
+											ElementType:         types.StringType,
+										},
+									},
+								},
+							},
 						},
 						"ssh": schema.SingleNestedAttribute{
 							MarkdownDescription: "SSH connection options.",
@@ -350,6 +399,7 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		lockPhase,
 		&k0sctl_phase.PrepareHosts{},
 		&k0sctl_phase.GatherK0sFacts{},
+		&k0sctl_phase.RunHooks{Stage: "before", Action: "reset"},
 		&k0sctl_phase.ResetWorkers{
 			NoDrain:  true,
 			NoDelete: true,
@@ -360,6 +410,7 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 			NoLeave:  true,
 		},
 		&k0sctl_phase.ResetLeader{},
+		&k0sctl_phase.RunHooks{Stage: "after", Action: "reset"},
 		&k0sctl_phase.Unlock{Cancel: lockPhase.Cancel},
 		&k0sctl_phase.Disconnect{},
 	)
@@ -396,16 +447,21 @@ func getK0sctlManagerForCreateOrUpdate(data *ClusterResourceModel, k0sctlConfig 
 		lockPhase,
 		&k0sctl_phase.PrepareHosts{},
 		&k0sctl_phase.GatherFacts{},
-		&k0sctl_phase.DownloadBinaries{},
-		&k0sctl_phase.UploadFiles{},
 		&k0sctl_phase.ValidateHosts{},
 		&k0sctl_phase.GatherK0sFacts{},
 		&k0sctl_phase.ValidateFacts{},
-		&k0sctl_phase.UploadBinaries{},
+
+		&k0sctl_phase.DownloadBinaries{},
+		&k0sctl_phase.UploadK0s{},
+
 		&k0sctl_phase.DownloadK0s{},
+
+		&k0sctl_phase.UploadFiles{},
 		&k0sctl_phase.InstallBinaries{},
 		&k0sctl_phase.PrepareArm{},
 		&k0sctl_phase.ConfigureK0s{},
+
+		&k0sctl_phase.RunHooks{Stage: "before", Action: "apply"},
 		&k0sctl_phase.InitializeK0s{},
 		&k0sctl_phase.InstallControllers{},
 		&k0sctl_phase.InstallWorkers{},
@@ -419,7 +475,10 @@ func getK0sctlManagerForCreateOrUpdate(data *ClusterResourceModel, k0sctlConfig 
 		&k0sctl_phase.ResetControllers{
 			NoDrain: data.NoDrain.ValueBool(),
 		},
+		&k0sctl_phase.RunHooks{Stage: "after", Action: "apply"},
+
 		&k0sctl_phase.GetKubeconfig{},
+
 		&k0sctl_phase.Unlock{Cancel: lockPhase.Cancel},
 		&k0sctl_phase.Disconnect{},
 	)
@@ -449,6 +508,52 @@ func getK0sctlConfig(ctx context.Context, dia *diag.Diagnostics, data *ClusterRe
 
 		authMethods, _ := k0s_rig.ParseSSHPrivateKey([]byte(host.SSH.KeyRaw.ValueString()), k0s_rig.DefaultPasswordCallback)
 
+		var hooks map[string]map[string][]string
+		hooks = make(map[string]map[string][]string)
+		hooks["apply"] = make(map[string][]string)
+		var applyBefore []string
+		var applyAfter []string
+		dia.Append(host.Hooks.Apply.Before.ElementsAs(ctx, &applyBefore, false)...)
+		if dia.HasError() {
+			return nil
+		}
+		if applyBefore == nil {
+			hooks["apply"]["before"] = []string{}
+		} else {
+			hooks["apply"]["before"] = applyBefore
+		}
+		dia.Append(host.Hooks.Apply.After.ElementsAs(ctx, &applyAfter, false)...)
+		if dia.HasError() {
+			return nil
+		}
+		if applyAfter == nil {
+			hooks["apply"]["after"] = []string{}
+		} else {
+			hooks["apply"]["after"] = applyAfter
+		}
+
+		hooks["reset"] = make(map[string][]string)
+		var resetBefore []string
+		var resetAfter []string
+		dia.Append(host.Hooks.Reset.Before.ElementsAs(ctx, &resetBefore, false)...)
+		if dia.HasError() {
+			return nil
+		}
+		if resetBefore == nil {
+			hooks["reset"]["before"] = []string{}
+		} else {
+			hooks["reset"]["before"] = resetBefore
+		}
+		dia.Append(host.Hooks.Reset.After.ElementsAs(ctx, &resetAfter, false)...)
+		if dia.HasError() {
+			return nil
+		}
+		if resetAfter == nil {
+			hooks["reset"]["after"] = []string{}
+		} else {
+			hooks["reset"]["after"] = resetAfter
+		}
+
 		k0sctlHosts = append(k0sctlHosts, &k0sctl_cluster.Host{
 			Connection: k0s_rig.Connection{
 				SSH: &k0s_rig.SSH{
@@ -468,6 +573,7 @@ func getK0sctlConfig(ctx context.Context, dia *diag.Diagnostics, data *ClusterRe
 			OSIDOverride:     host.OS.ValueString(),
 			InstallFlags:     installFlags,
 			Environment:      environment,
+			Hooks:			  hooks,
 		})
 	}
 
