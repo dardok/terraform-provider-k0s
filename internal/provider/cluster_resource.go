@@ -48,6 +48,10 @@ type ClusterResourceModelHost struct {
 	OS               types.String                		`tfsdk:"os"`
 	InstallFlags     types.List                  		`tfsdk:"install_flags"`
 	Environment      types.Map                   		`tfsdk:"environment"`
+	UploadBinary     types.Bool                  		`tfsdk:"upload_binary"`
+	K0sBinaryPath    types.String                       `tfsdk:"k0s_binary_path"`
+	K0sInstallPath   types.String                       `tfsdk:"k0s_install_path"`
+	K0sDownloadURL   types.String                       `tfsdk:"k0s_download_url"`
 	Hooks            ClusterResourceModelHostHooksPhase `tfsdk:"hooks"`
 }
 
@@ -146,6 +150,22 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							MarkdownDescription: "List of key-value pairs to set to the target host's environment variables.",
 							Optional:            true,
 							ElementType:         types.StringType,
+						},
+						"upload_binary": schema.BoolAttribute{
+							MarkdownDescription: "When true, the k0s binaries for target host will be downloaded and cached on the local host and uploaded to the target. When false, the k0s binary downloading is performed on the target host itself.",
+							Optional:            true,
+						},
+						"k0s_binary_path": schema.StringAttribute{
+							MarkdownDescription: "A path to a file on the local host that contains a k0s binary to be uploaded to the host.",
+							Optional:            true,
+						},
+						"k0s_install_path": schema.StringAttribute{
+							MarkdownDescription: "A path on the node where to install the k0s binary.",
+							Optional:            true,
+						},
+						"k0s_download_url": schema.StringAttribute{
+							MarkdownDescription: "A URL to download the k0s binary from.",
+							Optional:            true,
 						},
 						"hooks": schema.SingleNestedAttribute{
 							MarkdownDescription: "Phase hooks.",
@@ -260,7 +280,7 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 
 	manager := getK0sctlManagerForCreateOrUpdate(data, k0sctlConfig)
 
-	if err := manager.Run(); err != nil {
+	if err := manager.Run(ctx); err != nil {
 		resp.Diagnostics.AddError("k0sctl Error", fmt.Sprintf("Unable to create cluster, got error: %s", err))
 		return
 	}
@@ -310,7 +330,7 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 			&k0sctl_phase.Disconnect{},
 		)
 
-		if err := manager.Run(); err != nil {
+		if err := manager.Run(ctx); err != nil {
 			resp.Diagnostics.AddWarning("k0sctl Warning", fmt.Sprintf("Unable to read cluster when accessing via host %s, got error: %s", h.HostnameOverride, err))
 			continue
 		}	else {
@@ -356,7 +376,7 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	manager := getK0sctlManagerForCreateOrUpdate(data, k0sctlConfig)
 
-	if err := manager.Run(); err != nil {
+	if err := manager.Run(ctx); err != nil {
 		resp.Diagnostics.AddError("k0sctl Error", fmt.Sprintf("Unable to update cluster, got error: %s", err))
 		return
 	}
@@ -415,7 +435,7 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		&k0sctl_phase.Disconnect{},
 	)
 
-	if err := manager.Run(); err != nil {
+	if err := manager.Run(ctx); err != nil {
 		resp.Diagnostics.AddError("k0sctl Error", fmt.Sprintf("Unable to delete cluster, got error: %s", err))
 		return
 	}
